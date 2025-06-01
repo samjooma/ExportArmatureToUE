@@ -1,5 +1,4 @@
 import bpy
-from bpy.app.handlers import persistent
 import os
 
 class ActionSelectionProperty(bpy.types.PropertyGroup):
@@ -80,7 +79,8 @@ class ExportToUEOperator(bpy.types.Operator):
                 name_prefix = valid_armature.name
 
             action_selections = [{"name": x.name, "include_in_export": x.include_in_export} for x in self.action_selections]
-            bpy.ops.export_actions_quick.export(action_selections=action_selections, active_index=0, name_prefix=name_prefix)
+            if len(action_selections) > 1:
+                bpy.ops.quick_action_exporter.export(action_selections=action_selections, active_index=0, name_prefix=name_prefix)
 
         #
         # Export armature and meshes.
@@ -99,7 +99,13 @@ class ExportToUEOperator(bpy.types.Operator):
 
         if self.export_armature_and_meshes:
             for armature in valid_armatures:
-                original_meshes = (x for x in armature.children if x.type == "MESH")
+                def is_valid_mesh(object):
+                    return object.type == "MESH" and any(isinstance(x, bpy.types.ArmatureModifier) and x.object == armature for x in object.modifiers)
+                child_armature_meshes = [x for x in armature.children if is_valid_mesh(x)]
+                if len(child_armature_meshes) < 1:
+                    continue
+
+                # Create a duplicate and name it "Armature".
 
                 duplicate_armature_data = armature.data.copy()
                 duplicate_armature = armature.copy()
@@ -113,14 +119,16 @@ class ExportToUEOperator(bpy.types.Operator):
                     bpy.ops.object.make_local(type="SELECT_OBDATA_MATERIAL")
 
                 if "Armature" in bpy.data.objects:
-                    raise RuntimeError("An object named \"Armature\" already exists.")
+                    self.report({"ERROR"}, "An object named \"Armature\" already exists.")
+                    return {"Canceled"}
                 if "Armature" in bpy.data.armatures:
-                    raise RuntimeError("An armature named \"Armature\" already exists.")
+                    self.report({"ERROR"}, "Armature data named \"Armature\" already exists.")
+                    return {"Canceled"}
 
                 duplicate_armature.name = "Armature"
                 duplicate_armature.data.name = "Armature"
 
-                for child_mesh in original_meshes:
+                for child_mesh in child_armature_meshes:
                     duplicate_mesh_data = child_mesh.data.copy()
                     duplicate_mesh = child_mesh.copy()
                     duplicate_mesh.data = duplicate_mesh_data
@@ -151,7 +159,8 @@ class ExportToUEOperator(bpy.types.Operator):
                             object_types={"ARMATURE", "MESH"},
                             add_leaf_bones=False,
                             bake_anim=False,
-                            mesh_smooth_type="FACE"
+                            mesh_smooth_type="FACE",
+                            path_mode="RELATIVE"
                         )
 
                     # Remove the duplicate mesh.
