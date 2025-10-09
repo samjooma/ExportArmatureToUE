@@ -1,6 +1,7 @@
 import bpy
 import os
 import math
+import mathutils
 
 class ActionSelectionProperty(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
@@ -18,8 +19,11 @@ class ExportToUEOperator(bpy.types.Operator):
 
     action_selections: bpy.props.CollectionProperty(type=ActionSelectionProperty)
     active_index: bpy.props.IntProperty()
-    export_armature_meshes: bpy.props.BoolProperty(default=False, name="Export armature meshes")
-    export_child_meshes: bpy.props.BoolProperty(default=False, name="Export bone-parented meshes")
+    export_armature_meshes: bpy.props.BoolProperty(default=False, name="Export armature meshes", description="Export meshes that are children of selected armature.")
+    join_armature_meshes: bpy.props.BoolProperty(default=False, name="Join armature meshes", description="Join armatures meshes into one mesh.")
+    export_bone_child_meshes: bpy.props.BoolProperty(default=False, name="Export bone-parented meshes", description="Export meshes that are children of selected armature's bones.")
+    use_custom_name_prefix: bpy.props.BoolProperty(default=False, name="Use custom file name prefix", description="Use custom name prefix for exported files. By default armature name is used for actions and nothing for meshes. NOTE: This will break exporting multiple armatures at once.")
+    custom_name_prefix: bpy.props.StringProperty(name="Custom file name prefix", description="Use custom name prefix for exported files. By default armature name is used for actions and nothing for meshes. NOTE: This will break exporting multiple armatures at once.")
 
     @classmethod
     def poll(cls, context):
@@ -47,34 +51,63 @@ class ExportToUEOperator(bpy.types.Operator):
         rigify_armatures = [x for x in all_armatures if x.data.get("rig_id")]
         non_rigify_armatures = [x for x in all_armatures if not x.data.get("rig_id")]
 
-        created_armatures = []
+        # Duplicate non-rigify rigs.
+        duplicated_non_rigify_armatures = []
+        for rig in non_rigify_armatures:
+            bpy.ops.object.select_all(action="DESELECT")
+            for armature in rig.children_recursive:
+                armature.select_set(True)
+            rig.select_set(True)
+            context.view_layer.objects.active = rig
+            bpy.ops.object.duplicate(linked=False)
+            duplicated_non_rigify_armatures = context.selected_objects
+
+        # Duplicate rigify rigs.
+        duplicated_rigify_armatures = []
         if len(rigify_armatures) > 0:
             bpy.ops.object.select_all(action="DESELECT")
             for armature in rigify_armatures:
                 armature.select_set(True)
                 context.view_layer.objects.active = armature
             bpy.ops.rigify_duplication.duplicate(name_suffix=conversion_name_suffix)
-            created_armatures = context.selected_objects
+            duplicated_rigify_armatures = context.selected_objects
 
-        armatures_to_export = non_rigify_armatures + created_armatures
+        duplicated_armatures = duplicated_non_rigify_armatures + duplicated_rigify_armatures
+
+        def cleanup():
+            for armature in duplicated_armatures:
+                remove_recursive(armature)
+
+            bpy.ops.object.select_all(action="DESELECT")
+            for object in old_selected_objects:
+                object.select_set(True)
+            context.view_layer.objects.active = old_active_object
 
         #
         # Export actions.
         #
 
-        for armature in armatures_to_export:
+        for armature in duplicated_armatures:
             bpy.ops.object.select_all(action="DESELECT")
             armature.select_set(True)
             context.view_layer.objects.active = armature
             
-            if armature.name.endswith(conversion_name_suffix):
-                base_name = armature.name[:-len(conversion_name_suffix)]
+            if self.use_custom_name_prefix:
+                base_name = self.custom_name_prefix
             else:
-                base_name = armature.name
+                if armature.name.endswith(conversion_name_suffix):
+                    base_name = armature.name[:-len(conversion_name_suffix)]
+                else:
+                    base_name = armature.name
 
             action_selections = [{"name": x.name, "include_in_export": x.include_in_export} for x in self.action_selections]
             if len(action_selections) > 1:
                 bpy.ops.quick_action_exporter.export(action_selections=action_selections, active_index=0, name_prefix=base_name)
+
+        # Reset transformations.
+        for armature in all_armatures:
+            for x in armature.pose.bones:
+                x.matrix_basis = mathutils.Matrix.Identity(4)
 
         #
         # Export armature and meshes.
@@ -93,7 +126,7 @@ class ExportToUEOperator(bpy.types.Operator):
 
         # Export armature meshes.
         if self.export_armature_meshes:
-            for armature in armatures_to_export:
+            for armature in duplicated_armatures:
                 child_armature_meshes = [
                     x for x in armature.children if
                     x.type == "MESH" and
@@ -101,14 +134,30 @@ class ExportToUEOperator(bpy.types.Operator):
                 ]
                 if len(child_armature_meshes) < 1:
                     continue
+                
+                if self.join_armature_meshes:
+                    try:
+                        main_rig = next(x for x in child_armature_meshes if x.name.startswith(old_active_object.name))
+                    except StopIteration:
+                        main_rig = child_armature_meshes[0]
+                    
+                    context_override = context.copy()
+                    context_override["selected_objects"] = child_armature_meshes
+                    context_override["selected_editable_objects"] = child_armature_meshes
+                    context_override["active_object"] = main_rig
+                    with context.temp_override(**context_override):
+                        bpy.ops.object.join()
+                    child_armature_meshes = [main_rig]
 
                 # Rename armature to "Armature".
                 if "Armature" in bpy.data.objects:
                     self.report({"ERROR"}, "An object named \"Armature\" already exists.")
-                    return {"Canceled"}
+                    cleanup()
+                    return {"CANCELLED"}
                 if "Armature" in bpy.data.armatures:
                     self.report({"ERROR"}, "Armature data named \"Armature\" already exists.")
-                    return {"Canceled"}
+                    cleanup()
+                    return {"CANCELLED"}
                 armature.name = "Armature"
                 armature.data.name = "Armature"
 
@@ -119,6 +168,9 @@ class ExportToUEOperator(bpy.types.Operator):
                         file_name = file_name[:-4]
                     if file_name.endswith(conversion_name_suffix):
                         file_name = file_name[:-len(conversion_name_suffix)]
+                    
+                    if self.use_custom_name_prefix:
+                        file_name = f"{self.custom_name_prefix}_{file_name}"
 
                     directory_path = os.path.dirname(bpy.data.filepath)
                     export_path = f"{directory_path}\\{file_name}.fbx"
@@ -136,17 +188,17 @@ class ExportToUEOperator(bpy.types.Operator):
                             mesh_smooth_type="FACE",
                             path_mode="RELATIVE"
                         )
-        
-        # Export non-armature child meshes.
-        if self.export_child_meshes:
-            non_armature_child_meshes = set([])
-            for armature in armatures_to_export:
-                non_armature_child_meshes = non_armature_child_meshes.union({
+    
+        # Export bone child meshes.
+        if self.export_bone_child_meshes:
+            bone_child_meshes = set([])
+            for armature in duplicated_armatures:
+                bone_child_meshes = bone_child_meshes.union({
                     x for x in armature.children if
                     x.type == "MESH" and x.parent_type == "BONE" and x.parent_bone in armature.data.bones
                 })
 
-            for child_mesh in non_armature_child_meshes:
+            for child_mesh in bone_child_meshes:
                 duplicate_mesh = child_mesh.copy()
                 duplicate_mesh.data = child_mesh.data.copy()
 
@@ -221,19 +273,7 @@ class ExportToUEOperator(bpy.types.Operator):
                 remove_recursive(duplicate_mesh)
                 remove_recursive(duplicate_collision_mesh)
 
-        # Remove converted armatures and their meshes.
-        for armature in created_armatures:
-            remove_recursive(armature)
-
-        #
-        # Restore selections.
-        #
-
-        bpy.ops.object.select_all(action="DESELECT")
-        for object in old_selected_objects:
-            object.select_set(True)
-        context.view_layer.objects.active = old_active_object
-    
+        cleanup()
         return {"FINISHED"}
     
     def invoke(self, context, event):
@@ -250,10 +290,18 @@ class ExportToUEOperator(bpy.types.Operator):
                 new_action_property = self.action_selections.add()
                 new_action_property.name = action_name
 
-        return context.window_manager.invoke_props_dialog(self)
+        return context.window_manager.invoke_props_dialog(self, width=400)
 
     def draw(self, context):
         layout = self.layout
+
+        all_armatures = [x for x in context.selected_objects if x.type == "ARMATURE" and any(child.type == "MESH" for child in x.children)]
+        armature_count = len(all_armatures)
+        armatures_string = "Selected armatures " if armature_count > 1 else "Selected armature "
+        for i, x in enumerate(all_armatures):
+            armatures_string += f', "{x.name}"' if i > 0 else f'"{x.name}"'
+        layout.label(text=armatures_string)
+
         layout.label(text="Actions")
         layout.template_list(
             listtype_name="QUICK_ACTION_EXPORT_UL_action_selection",
@@ -264,8 +312,17 @@ class ExportToUEOperator(bpy.types.Operator):
             active_propname="active_index",
             type="DEFAULT",
         )
-        layout.prop(data=self, property="export_armature_meshes")
-        layout.prop(data=self, property="export_child_meshes")
+
+        row = layout.row()
+        row.prop(data=self, property="export_armature_meshes")
+        row.prop(data=self, property="join_armature_meshes")
+
+        layout.prop(data=self, property="export_bone_child_meshes")
+        row = layout.row()
+        row.prop(data=self, property="use_custom_name_prefix", text="Custom name prefix")
+        row2 = row.row()
+        row2.prop(data=self, property="custom_name_prefix", text="")
+        row2.enabled = self.use_custom_name_prefix
 
 #
 # Registration.
