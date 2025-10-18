@@ -53,12 +53,12 @@ class ExportToUEOperator(bpy.types.Operator):
 
         # Duplicate non-rigify rigs.
         duplicated_non_rigify_armatures = []
-        for rig in non_rigify_armatures:
+        for armature in non_rigify_armatures:
             bpy.ops.object.select_all(action="DESELECT")
-            for armature in rig.children_recursive:
-                armature.select_set(True)
-            rig.select_set(True)
-            context.view_layer.objects.active = rig
+            for child in armature.children_recursive:
+                child.select_set(True)
+            armature.select_set(True)
+            context.view_layer.objects.active = armature
             bpy.ops.object.duplicate(linked=False)
             duplicated_non_rigify_armatures = context.selected_objects
 
@@ -73,15 +73,42 @@ class ExportToUEOperator(bpy.types.Operator):
             duplicated_rigify_armatures = context.selected_objects
 
         duplicated_armatures = duplicated_non_rigify_armatures + duplicated_rigify_armatures
+        objects_pending_removal = duplicated_armatures
+        
+        def remove_recursive(object):
+            for child in object.children:
+                remove_recursive(child)
+            
+            data = object.data
+            bpy.data.objects.remove(object)
+            try:
+                bpy.data.meshes.remove(data)
+            except TypeError:
+                bpy.data.armatures.remove(data)
 
         def cleanup():
-            for armature in duplicated_armatures:
+            for armature in objects_pending_removal:
                 remove_recursive(armature)
 
             bpy.ops.object.select_all(action="DESELECT")
             for object in old_selected_objects:
                 object.select_set(True)
             context.view_layer.objects.active = old_active_object
+
+        def create_file_export_path(name):
+            # Remove suffixes.
+            file_name = child_mesh.name
+            if len(file_name) > 4 and file_name[-4] == "." and file_name[-3:].isdigit():
+                file_name = file_name[:-4]
+            if file_name.endswith(conversion_name_suffix):
+                file_name = file_name[:-len(conversion_name_suffix)]
+            
+            # Add custom prefix.
+            if self.use_custom_name_prefix:
+                file_name = f"{self.custom_name_prefix}_{file_name}"
+
+            directory_path = os.path.dirname(bpy.data.filepath)
+            return f"{directory_path}\\{file_name}.fbx"
 
         #
         # Export actions.
@@ -113,24 +140,13 @@ class ExportToUEOperator(bpy.types.Operator):
         # Export armature and meshes.
         #
 
-        def remove_recursive(object):
-            for child in object.children:
-                remove_recursive(child)
-            
-            data = object.data
-            bpy.data.objects.remove(object)
-            try:
-                bpy.data.meshes.remove(data)
-            except TypeError:
-                bpy.data.armatures.remove(data)
-
         # Export armature meshes.
         if self.export_armature_meshes:
             for armature in duplicated_armatures:
                 child_armature_meshes = [
-                    x for x in armature.children if
-                    x.type == "MESH" and
-                    any(isinstance(y, bpy.types.ArmatureModifier) and y.object == armature for y in x.modifiers)
+                    child for child in armature.children if
+                    child.type == "MESH" and
+                    any(isinstance(modifier, bpy.types.ArmatureModifier) and modifier.object == armature for modifier in child.modifiers)
                 ]
                 if len(child_armature_meshes) < 1:
                     continue
@@ -162,24 +178,11 @@ class ExportToUEOperator(bpy.types.Operator):
                 armature.data.name = "Armature"
 
                 for child_mesh in child_armature_meshes:
-                    # Use mesh name as the file name, but remove suffixes.
-                    file_name = child_mesh.name
-                    if len(file_name) > 4 and file_name[-4] == "." and file_name[-3:].isdigit():
-                        file_name = file_name[:-4]
-                    if file_name.endswith(conversion_name_suffix):
-                        file_name = file_name[:-len(conversion_name_suffix)]
-                    
-                    if self.use_custom_name_prefix:
-                        file_name = f"{self.custom_name_prefix}_{file_name}"
-
-                    directory_path = os.path.dirname(bpy.data.filepath)
-                    export_path = f"{directory_path}\\{file_name}.fbx"
-
                     context_override = context.copy()
                     context_override["selected_objects"] = [armature, child_mesh]
                     with context.temp_override(**context_override):
                         bpy.ops.export_scene.fbx(
-                            filepath=export_path,
+                            filepath=create_file_export_path(child_mesh.name),
                             use_selection=True,
                             use_visible=False,
                             object_types={"ARMATURE", "MESH"},
@@ -189,78 +192,70 @@ class ExportToUEOperator(bpy.types.Operator):
                             path_mode="RELATIVE"
                         )
     
-        # Export bone child meshes.
+        # Export child meshes.
         if self.export_bone_child_meshes:
             bone_child_meshes = set([])
             for armature in duplicated_armatures:
                 bone_child_meshes = bone_child_meshes.union({
-                    x for x in armature.children if
-                    x.type == "MESH" and x.parent_type == "BONE" and x.parent_bone in armature.data.bones
+                    child for child in armature.children if
+                    child.type == "MESH" and child.parent_type == "BONE" and child.parent_bone in armature.data.bones
                 })
 
             for child_mesh in bone_child_meshes:
-                duplicate_mesh = child_mesh.copy()
-                duplicate_mesh.data = child_mesh.data.copy()
+                parent_armature = child_mesh.parent
+                parent_bone_name = child_mesh.parent_bone
 
+                # Create a collision mesh.
                 duplicate_collision_mesh = child_mesh.copy()
                 duplicate_collision_mesh.data = child_mesh.data.copy()
-
-                context.scene.collection.objects.link(duplicate_mesh)
                 context.scene.collection.objects.link(duplicate_collision_mesh)
-                parent_bone_name = duplicate_mesh.parent_bone
-                duplicate_collision_mesh.name = f"UCX_{duplicate_mesh.name}"
+                duplicate_collision_mesh.name = f"UCX_{child_mesh.name}"
 
                 # Clear parent.
                 context_override = context.copy()
-                context_override["selected_editable_objects"] = [duplicate_mesh, duplicate_collision_mesh]
+                context_override["selected_editable_objects"] = [child_mesh, duplicate_collision_mesh]
                 with context.temp_override(**context_override):
                     bpy.ops.object.parent_clear(type="CLEAR")
 
+                # Mark meshes for removal now that they're no longer parented to armatures that are being removed.
+                objects_pending_removal += [child_mesh, duplicate_collision_mesh]
+
                 # Select armature.
-                armature = child_mesh.parent
+                print(f"child_mesh.name: {child_mesh.name}")
+                print(f"parent_armature.name: {parent_armature.name}")
                 bpy.ops.object.select_all(action="DESELECT")
-                armature.select_set(True)
-                context.view_layer.objects.active = armature
+                parent_armature.select_set(True)
+                context.view_layer.objects.active = parent_armature
 
                 # Get bone transformation.
                 bpy.ops.object.mode_set(mode="EDIT")
-                parent_bone = armature.data.edit_bones[parent_bone_name]
+                parent_bone = parent_armature.data.edit_bones[parent_bone_name]
                 inverse_matrix = parent_bone.matrix.inverted()
                 bpy.ops.object.mode_set(mode="OBJECT")
                 
                 # Translate.
                 context_override = context.copy()
-                context_override["selected_objects"] = [duplicate_mesh, duplicate_collision_mesh]
-                context_override["selected_editable_objects"] = [duplicate_mesh, duplicate_collision_mesh]
+                context_override["selected_objects"] = [child_mesh, duplicate_collision_mesh]
+                context_override["selected_editable_objects"] = [child_mesh, duplicate_collision_mesh]
                 with context.temp_override(**context_override):
                     bpy.ops.transform.translate(value=inverse_matrix.to_translation())
 
                 # Rotate.
-                duplicate_mesh.rotation_quaternion = inverse_matrix.to_quaternion()
-                duplicate_mesh.rotation_euler = inverse_matrix.to_euler()
+                child_mesh.rotation_quaternion = inverse_matrix.to_quaternion()
+                child_mesh.rotation_euler = inverse_matrix.to_euler()
                 duplicate_collision_mesh.rotation_quaternion = inverse_matrix.to_quaternion()
                 duplicate_collision_mesh.rotation_euler = inverse_matrix.to_euler()
 
                 context_override = context.copy()
-                context_override["selected_editable_objects"] = [duplicate_mesh, duplicate_collision_mesh]
+                context_override["selected_editable_objects"] = [child_mesh, duplicate_collision_mesh]
                 with context.temp_override(**context_override):
                     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
-                # Use mesh name as the file name, but remove suffixes.
-                file_name = child_mesh.name
-                if len(file_name) > 4 and file_name[-4] == "." and file_name[-3:].isdigit():
-                    file_name = file_name[:-4]
-                if file_name.endswith(conversion_name_suffix):
-                    file_name = file_name[:-len(conversion_name_suffix)]
-
-                directory_path = os.path.dirname(bpy.data.filepath)
-                export_path = f"{directory_path}\\{file_name}.fbx"
-
                 context_override = context.copy()
-                context_override["selected_objects"] = [duplicate_mesh, duplicate_collision_mesh]
+                context_override["selected_objects"] = [child_mesh, duplicate_collision_mesh]
                 with context.temp_override(**context_override):
                     bpy.ops.export_scene.fbx(
-                        filepath=export_path,
+                        filepath=create_file_export_path(child_mesh.name),
                         use_selection=True,
                         use_visible=False,
                         object_types={"MESH"},
@@ -270,8 +265,7 @@ class ExportToUEOperator(bpy.types.Operator):
                         path_mode="RELATIVE"
                     )
 
-                remove_recursive(duplicate_mesh)
-                remove_recursive(duplicate_collision_mesh)
+                # remove_recursive(duplicate_collision_mesh)
 
         cleanup()
         return {"FINISHED"}
