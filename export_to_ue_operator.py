@@ -88,8 +88,12 @@ class ExportToUEOperator(bpy.types.Operator):
                 child.select_set(True)
             armature.select_set(True)
             context.view_layer.objects.active = armature
+
             bpy.ops.object.duplicate(linked=False)
             duplicated_non_rigify_armatures = context.selected_objects
+
+            for x in duplicated_non_rigify_armatures:
+                x.data = x.data.copy()
 
         # Duplicate rigify rigs.
         duplicated_rigify_armatures = []
@@ -276,7 +280,7 @@ class ExportToUEOperator(bpy.types.Operator):
                 with context.temp_override(**context_override):
                     bpy.ops.object.parent_clear(type="CLEAR")
 
-                # Mark meshes for removal now that they're no longer parented to armatures that are being removed.
+                # Mark meshes for removal because they're no longer parented to armatures that are being removed.
                 objects_pending_removal += [child_mesh, duplicate_collision_mesh]
 
                 # Select armature.
