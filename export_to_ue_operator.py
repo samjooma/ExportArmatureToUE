@@ -308,8 +308,6 @@ class ExportToUEOperator(bpy.types.Operator):
                 objects_pending_removal += [child_mesh, duplicate_collision_mesh]
 
                 # Select armature.
-                print(f"child_mesh.name: {child_mesh.name}")
-                print(f"parent_armature.name: {parent_armature.name}")
                 bpy.ops.object.select_all(action="DESELECT")
                 parent_armature.select_set(True)
                 context.view_layer.objects.active = parent_armature
