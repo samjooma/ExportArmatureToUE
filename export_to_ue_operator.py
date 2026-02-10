@@ -68,7 +68,7 @@ class ExportToUEOperator(bpy.types.Operator):
         # Convert rigify armatures.
         #
 
-        conversion_name_suffix = "_Converted"
+        duplication_name_suffix = "_Temp"
 
         all_armatures = [
             x
@@ -83,17 +83,40 @@ class ExportToUEOperator(bpy.types.Operator):
         # Duplicate non-rigify rigs.
         duplicated_non_rigify_armatures = []
         for armature in non_rigify_armatures:
+            # Don't duplicate actions.
+            try:
+                old_action = armature.animation_data.action
+                armature.animation_data.action = None
+            except AttributeError:
+                old_action = None
+
             bpy.ops.object.select_all(action="DESELECT")
-            for child in armature.children_recursive:
-                child.select_set(True)
-            armature.select_set(True)
-            context.view_layer.objects.active = armature
 
-            bpy.ops.object.duplicate(linked=False)
-            duplicated_non_rigify_armatures = context.selected_objects
+            duplicate_object_dict = {}
+            for x in [armature] + armature.children_recursive:
+                x.select_set(True)
+                context.view_layer.objects.active = x
 
-            for x in duplicated_non_rigify_armatures:
-                x.data = x.data.copy()
+                bpy.ops.object.duplicate(linked=False)
+                context.active_object.data = context.active_object.data.copy()
+                context.active_object.name = (
+                    f"{context.active_object.name[:-4]}{duplication_name_suffix}"
+                )
+                duplicate_object_dict[x] = context.active_object
+                bpy.ops.object.select_all(action="DESELECT")
+
+            for duplicate in duplicate_object_dict.values():
+                try:
+                    duplicate.parent = duplicate_object_dict[duplicate.parent]
+                except KeyError:
+                    pass
+
+            duplicated_non_rigify_armatures.append(duplicate_object_dict[armature])
+
+            try:
+                armature.animation_data.action = old_action
+            except AttributeError:
+                pass
 
         # Duplicate rigify rigs.
         duplicated_rigify_armatures = []
@@ -102,7 +125,7 @@ class ExportToUEOperator(bpy.types.Operator):
             for armature in rigify_armatures:
                 armature.select_set(True)
                 context.view_layer.objects.active = armature
-            bpy.ops.rigify_duplication.duplicate(name_suffix=conversion_name_suffix)
+            bpy.ops.rigify_duplication.duplicate(name_suffix=duplication_name_suffix)
             duplicated_rigify_armatures = context.selected_objects
 
         duplicated_armatures = (
@@ -135,8 +158,8 @@ class ExportToUEOperator(bpy.types.Operator):
             file_name = name
             if len(file_name) > 4 and file_name[-4] == "." and file_name[-3:].isdigit():
                 file_name = file_name[:-4]
-            if file_name.endswith(conversion_name_suffix):
-                file_name = file_name[: -len(conversion_name_suffix)]
+            if file_name.endswith(duplication_name_suffix):
+                file_name = file_name[: -len(duplication_name_suffix)]
 
             # Add custom prefix.
             if self.use_custom_name_prefix:
@@ -157,8 +180,8 @@ class ExportToUEOperator(bpy.types.Operator):
             if self.use_custom_name_prefix:
                 base_name = self.custom_name_prefix
             else:
-                if armature.name.endswith(conversion_name_suffix):
-                    base_name = armature.name[: -len(conversion_name_suffix)]
+                if armature.name.endswith(duplication_name_suffix):
+                    base_name = armature.name[: -len(duplication_name_suffix)]
                 else:
                     base_name = armature.name
 
@@ -166,7 +189,8 @@ class ExportToUEOperator(bpy.types.Operator):
                 {"name": x.name, "include_in_export": x.include_in_export}
                 for x in self.action_selections
             ]
-            if len(action_selections) > 1:
+
+            if len(action_selections) > 0:
                 bpy.ops.quick_action_exporter.export(
                     action_selections=action_selections,
                     active_index=0,
