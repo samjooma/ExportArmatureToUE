@@ -445,12 +445,14 @@ class ExportToUEOperator(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
 
-        for armature_property in self.armature_mesh_names:
+        list_id_base_name = "Mesh list"
+        for i, armature_property in enumerate(self.armature_mesh_names):
+            list_id = f"{list_id_base_name} {i}"
             label_text = f'Armature: "{armature_property.name}", meshes:'
             layout.label(text=label_text)
             layout.template_list(
                 listtype_name="EXPORT_TO_UE_UL_export_selections",
-                list_id="",
+                list_id=list_id,
                 dataptr=armature_property,
                 propname="child_mesh_selections",
                 active_dataptr=armature_property,
@@ -461,7 +463,7 @@ class ExportToUEOperator(bpy.types.Operator):
         layout.label(text="Actions")
         layout.template_list(
             listtype_name="EXPORT_TO_UE_UL_export_selections",
-            list_id="",
+            list_id="Action list",
             dataptr=self,
             propname="action_selections",
             active_dataptr=self,
