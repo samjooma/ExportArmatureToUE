@@ -131,6 +131,17 @@ class ExportToUEOperator(bpy.types.Operator):
                 except KeyError:
                     pass
 
+            for duplicate in duplicate_object_dict.values():
+                for modifier in (
+                    x
+                    for x in duplicate.modifiers
+                    if isinstance(x, bpy.types.ArmatureModifier)
+                ):
+                    try:
+                        modifier.object = duplicate_object_dict[modifier.object]
+                    except KeyError:
+                        pass
+
             duplicated_non_rigify_armatures.append(duplicate_object_dict[armature])
 
             try:
@@ -232,7 +243,7 @@ class ExportToUEOperator(bpy.types.Operator):
                 child
                 for child in armature.children
                 if child.type == "MESH"
-                and any(child.name.startswith(x) for x in mesh_names_to_export)
+                and child.name[: -len(duplication_name_suffix)] in mesh_names_to_export
                 and any(
                     isinstance(modifier, bpy.types.ArmatureModifier)
                     and modifier.object == armature
@@ -269,6 +280,9 @@ class ExportToUEOperator(bpy.types.Operator):
                 self.report({"ERROR"}, 'Armature data named "Armature" already exists.')
                 cleanup()
                 return {"CANCELLED"}
+
+            old_name = armature.name
+            old_data_name = armature.data.name
             armature.name = "Armature"
             armature.data.name = "Armature"
 
@@ -286,6 +300,9 @@ class ExportToUEOperator(bpy.types.Operator):
                         mesh_smooth_type="FACE",
                         path_mode="RELATIVE",
                     )
+
+            armature.name = old_name
+            armature.data.name = old_data_name
 
         # Export child meshes.
         if self.export_bone_child_meshes:
