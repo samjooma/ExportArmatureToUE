@@ -81,7 +81,7 @@ class ExportToUEOperator(bpy.types.Operator):
         # Convert rigify armatures.
         #
 
-        duplication_name_suffix = "_Temp"
+        duplication_name_suffix = "_temp"
 
         original_armatures = [
             bpy.data.objects[x.name] for x in self.armature_mesh_names
@@ -271,7 +271,31 @@ class ExportToUEOperator(bpy.types.Operator):
                     bpy.ops.object.join()
                 valid_child_meshes = [main_rig]
 
-            # Rename armature to "Armature".
+            temporary_renames = []
+
+            def temporary_rename(x, new_name):
+                old_name = x.name
+                x.name = new_name
+                temporary_renames.append(
+                    {
+                        "object": x,
+                        "old_name": old_name,
+                    }
+                )
+
+            try:
+                temporary_rename(
+                    bpy.data.objects["Armature"], f"Armature{duplication_name_suffix}"
+                )
+            except KeyError:
+                pass
+            try:
+                temporary_rename(
+                    bpy.data.armatures["Armature"], f"Armature{duplication_name_suffix}"
+                )
+            except KeyError:
+                pass
+
             if "Armature" in bpy.data.objects:
                 self.report({"ERROR"}, 'An object named "Armature" already exists.')
                 cleanup()
@@ -281,10 +305,8 @@ class ExportToUEOperator(bpy.types.Operator):
                 cleanup()
                 return {"CANCELLED"}
 
-            old_name = armature.name
-            old_data_name = armature.data.name
-            armature.name = "Armature"
-            armature.data.name = "Armature"
+            temporary_rename(armature, "Armature")
+            temporary_rename(armature.data, "Armature")
 
             for child_mesh in valid_child_meshes:
                 context_override = context.copy()
@@ -295,14 +317,16 @@ class ExportToUEOperator(bpy.types.Operator):
                         use_selection=True,
                         use_visible=False,
                         object_types={"ARMATURE", "MESH"},
+                        apply_unit_scale=True,
                         add_leaf_bones=False,
                         bake_anim=False,
                         mesh_smooth_type="FACE",
                         path_mode="RELATIVE",
                     )
 
-            armature.name = old_name
-            armature.data.name = old_data_name
+            # Undo temporary renames.
+            for renames in reversed(temporary_renames):
+                renames["object"].name = renames["old_name"]
 
         # Export child meshes.
         if self.export_bone_child_meshes:
